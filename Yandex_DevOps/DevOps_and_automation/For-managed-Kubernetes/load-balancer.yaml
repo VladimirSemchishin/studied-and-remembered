@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: Service
+metadata:
+ name: my-loadbalancer
+spec:
+ selector: #для того чтобы указать метку селектора из шаблона подов в манифесте объекта Deployment	
+  app: nginx
+ ports:
+ - port: 80 #порт сетевого балансировщика, на котором будут облуживаться пользовательские запросы
+   targetPort: 80 #порт контейнера, на котором доступно приложение
+ type: LoadBalancer

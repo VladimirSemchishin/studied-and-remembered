@@ -1,0 +1,657 @@
+# О терраформе
+
+На предыдущих уроках вы создали образ ВМ, описав его текстовым файлом — спецификацией. Сейчас мы пойдём ещё дальше: познакомимся с программой [Terraform](https://www.terraform.io/), которая позволяет похожим образом создавать облачную инфраструктуру (не только ВМ, но и балансировщики, сети, базы данных, хранилища и т. д.). Подготовив один файл спецификации, вы автоматически развернёте из него готовую инфраструктуру. Риски ошибок ручной сборки сводятся к минимуму.
+
+Вот так выглядит каркас спецификации для Terraform. Он состоит из описания **ресурсов**: ВМ, сетей, подсетей и т. д.
+
+```
+resource "yandex_compute_instance" "vm-1" {
+  ...
+}
+ 
+resource "yandex_vpc_network" "network-1" {
+  ...
+}
+ 
+resource "yandex_vpc_subnet" "subnet-1" {
+  ...
+}
+```
+
+Terraform позволяет предварительно посмотреть план выполнения: что будет создано и удалено в процессе работы. Благодаря этому вы можете удостовериться, что получите инфраструктуру нужной конфигурации, а ничего лишнего не появится и не пропадёт.
+
+Вывод команды с проверкой создаваемых ресурсов:
+
+```
+Terraform will perform the following actions:
+ 
+  # yandex_compute_instance.vm-1 will be created
+  + resource "yandex_compute_instance" "vm-1" {
+    ...
+    }
+ 
+  # yandex_vpc_network.network-1 will be created
+  + resource "yandex_vpc_network" "network-1" {
+    ...
+    }
+ 
+  # yandex_vpc_subnet.subnet-1 will be created
+  + resource "yandex_vpc_subnet" "subnet-1" {
+    ...
+    }
+ 
+Plan: ... to add, 0 to change, 0 to destroy.
+```
+
+В Terraform объекты можно связывать друг с другом. Например, можно подключить ВМ к сети, созданной в этой же спецификации.
+
+```
+resource "yandex_compute_instance" "vm-1" {
+  ...
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+    nat       = true
+  }
+}
+ 
+resource "yandex_vpc_subnet" "subnet-1" {
+  ...
+}
+```
+
+## Спецификации Terraform
+
+[Terraform](https://www.terraform.io/), как и Packer, разработала компания HashiCorp. Облачные провайдеры, в том числе Yandex Cloud, поддерживают спецификации Terraform. Обычно они пишутся на языке HCL и хранятся в файлах формата `.tf`.  Для удобства таких файлов может быть несколько. При запуске Terraform просматривает все файлы в директории и воспринимает их как единую спецификацию.
+
+Посмотрите [пример файла спецификации](https://cloud.yandex.ru/docs/solutions/infrastructure-management/terraform-quickstart#configure-provider). Привязка к провайдеру (в данном случае это Yandex Cloud) задаётся в секциях `required_providers` и `provider`:
+
+```json
+terraform {
+  required_providers {
+    yandex = {
+      source = "yandex-cloud/yandex"
+    }
+  }
+}
+ 
+provider "yandex" {
+  token     = "<OAuth-токен>"
+  cloud_id  = "<идентификатор_облака>"
+  folder_id = "<идентификатор_каталога>"
+  zone      = "<зона_доступности_по_умолчанию>"
+}
+```
+
+Как и Packer, Terraform поддерживает различные способы аутентификации. В спецификации выше в параметре `token` задан [OAuth-токен](https://cloud.yandex.ru/docs/iam/concepts/authorization/oauth-token) от Yandex Cloud. Другой способ аутентифицироваться — использовать переменную окружения `YC_TOKEN`, в которую можно записать не только OAuth-токен, но и [IAM-токен](https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs#configuration-reference).
+
+Значения параметров или задаются в спецификации, или передаются в качестве **переменных**, чтобы адаптировать спецификацию для конкретных задач. Например, с помощью одной спецификации вы сможете развернуть одинаковую инфраструктуру в разных каталогах — для тестирования и для рабочей эксплуатации:
+
+```
+variable "folder-id" {
+  type = string
+}
+ 
+provider "yandex" {
+  token     = "<OAuth-токен>"
+  cloud_id  = "<идентификатор_облака>"
+  folder_id = var.folder-id
+  zone      = "<зона_доступности_по_умолчанию>"
+}
+```
+
+При этом ключевые ресурсы и зависимости остаются зафиксированы в спецификации и обеспечивают ее работоспособность.
+
+## Как использовать спецификации Terraform
+
+Инфраструктура разворачивается в три этапа:
+
+1. Команда `terraform init` инициализирует провайдеров, указанных в файле спецификации.
+2. Команда `terraform plan` запускает проверку спецификации. Если есть ошибки — появятся предупреждения. Если ошибок нет, отобразится список элементов, которые будут созданы или удалены.
+3. Команда `terraform apply` запускает развёртывание инфраструктуры.
+
+Если инфраструктура больше не нужна, её можно удалить командой `terraform destroy`.
+
+## Оптимизация создания инфраструктуры
+
+На самом деле Terraform не всегда создаёт заново все ресурсы, описанные в спецификации. Terraform ведёт реестр, в котором фиксирует состояние инфраструктуры в облаке. Этот реестр называется [State](https://www.terraform.io/docs/language/state/index.html) (**стейт-файл**), он имеет формат JSON.
+
+State поддерживает связь между описанием ресурсов в спецификации и реальными ресурсами в облаке. При запуске команд `plan` и `apply` стейт-файл сравнивается с ресурсами, которые нужно создать из спецификации. По итогам сравнения недостающие ресурсы создаются, лишние — удаляются, а некоторые изменяются на ходу. Такой подход позволяет существенно улучшить производительность операций развёртывания, особенно для масштабных инфраструктур. После выполнения команды `apply` стейт-файл обновляется.
+
+С помощью команд и стейт-файлов вы можете управлять конфигурацией облачной инфраструктуры: импортировать ее описание в стейт-файл (команда `terraform import`), исключить ресурсы из стейт-файла (`terraform state rm`), выгрузить описание (`terraform output` и `terraform show`).
+
+**Проверьте себя**
+
+**Переменные в Terraform нужны, чтобы...**
+
+- описывать объекты, которые меняют состояние при работе облака
+
+- описывать объекты, которые различаются в разных версиях спецификации
+
+- задавать значения, которые могут различаться в разных инсталляциях одной спецификации
+
+**Что делает команда `terraform plan`?**
+
+- Подсчитывает стоимость тарифицируемых сервисов и проверяет, достаточно ли средств на балансе
+
+- Проверяет правильность спецификации и формирует список элементов инфраструктуры, которые будут созданы, изменены или удалены
+
+- Подбирает оптимальные значения переменных для развертывания
+
+- Планирует работы, которые должны быть выполнены в облаке сразу после развертывания
+
+Ответ - (3;2)
+
+> При помощи Packer мы уже описали создание ВМ в текстовом файле - спецификации.
+>
+> При помощи Terraform, похожим образом, создадим облачную инфраструктуру (ВМ, балансировщик, сеть, БД, хранилища) - одним файлом можно развернуть всю инфраструктуру.
+>
+> В файле есть структура, где отдельно описываются ВМ, сеть, подсеть... Выполнение можно посмотреть предварительно.
+>
+> Так же можно объекты связывать друг с другом (подключить ВМ к сети в той же спецификации)
+>
+> Значения параметров можно непосредственно записать в спецификацию (на прямую вставить ID), а можно создать переменную и в нее записать ID, после чего обращаться к переменной. 
+>
+> Инфраструктура разворачивается в 3 этапа:
+>
+> - `terraform init` - инициализирует (привод в готовность) провайдеров из спецификации
+>
+> - `terraform plan` - проверяет спецификацию, после нее либо список ошибок, либо список элементов, которые будут созданы или удалены
+>
+>   > State (стэйт-файл) - реестр, в котором фиксируется состояние инфраструктуры в облаке
+>   >
+>   > При запуске вышеуказанных команд Стэйт-файл сравнивается с ресурсами, которые нужно создать из спецификации. Если есть лишние, он их удаляет, недостающие создаются, а некоторые изменются на ходу.
+>
+> - `terraform apply` - запуск развертывания
+>
+>   > После этой команды Стэйт-файл обновляется 
+>
+> Удалить инфраструктуру - `terraform destroy`
+>
+> При помощи команд и стэйт-файла управляется конфигурация облачной инфраструктуры:
+>
+> - импортировать описание инфраструктуры в стейт-файл `terraform import`
+> - исключить ресуры из стейт файла `terraform state rm`
+> - выгрузить описание `terraform output и terraform show`
+
+# О терраформе
+
+На предыдущих уроках вы создали образ ВМ, описав его текстовым файлом — спецификацией. Сейчас мы пойдём ещё дальше: познакомимся с программой [Terraform](https://www.terraform.io/), которая позволяет похожим образом создавать облачную инфраструктуру (не только ВМ, но и балансировщики, сети, базы данных, хранилища и т. д.). Подготовив один файл спецификации, вы автоматически развернёте из него готовую инфраструктуру. Риски ошибок ручной сборки сводятся к минимуму.
+
+Вот так выглядит каркас спецификации для Terraform. Он состоит из описания **ресурсов**: ВМ, сетей, подсетей и т. д.
+
+```
+resource "yandex_compute_instance" "vm-1" {
+  ...
+}
+resource "yandex_vpc_network" "network-1" {
+  ...
+}
+resource "yandex_vpc_subnet" "subnet-1" {
+  ...
+}
+```
+
+Terraform позволяет предварительно посмотреть план выполнения: что будет создано и удалено в процессе работы. Благодаря этому вы можете удостовериться, что получите инфраструктуру нужной конфигурации, а ничего лишнего не появится и не пропадёт.
+
+Вывод команды с проверкой создаваемых ресурсов:
+
+```
+Terraform will perform the following actions:
+ 
+  # yandex_compute_instance.vm-1 will be created
+  + resource "yandex_compute_instance" "vm-1" {
+    ...
+    }
+ 
+  # yandex_vpc_network.network-1 will be created
+  + resource "yandex_vpc_network" "network-1" {
+    ...
+    }
+ 
+  # yandex_vpc_subnet.subnet-1 will be created
+  + resource "yandex_vpc_subnet" "subnet-1" {
+    ...
+    }
+ 
+Plan: ... to add, 0 to change, 0 to destroy.
+```
+
+В Terraform объекты можно связывать друг с другом. Например, можно подключить ВМ к сети, созданной в этой же спецификации.
+
+```
+resource "yandex_compute_instance" "vm-1" {
+  ...
+  network_interface {
+    subnet_id = yandex_vpc_subnet.subnet-1.id
+    nat       = true
+  }
+}
+ 
+resource "yandex_vpc_subnet" "subnet-1" {
+  ...
+}
+```
+
+## Спецификации Terraform
+
+[Terraform](https://www.terraform.io/), как и Packer, разработала компания HashiCorp. Облачные провайдеры, в том числе Yandex Cloud, поддерживают спецификации Terraform. Обычно они пишутся на языке HCL и хранятся в файлах формата `.tf`.  Для удобства таких файлов может быть несколько. При запуске Terraform просматривает все файлы в директории и воспринимает их как единую спецификацию.
+
+Посмотрите [пример файла спецификации](https://cloud.yandex.ru/docs/solutions/infrastructure-management/terraform-quickstart#configure-provider). Привязка к провайдеру (в данном случае это Yandex Cloud) задаётся в секциях `required_providers` и `provider`:
+
+```
+terraform {
+  required_providers {
+    yandex = {
+      source = "yandex-cloud/yandex"
+    }
+  }
+}
+ 
+provider "yandex" {
+  token     = "<OAuth-токен>"
+  cloud_id  = "<идентификатор_облака>"
+  folder_id = "<идентификатор_каталога>"
+  zone      = "<зона_доступности_по_умолчанию>"
+}
+```
+
+Как и Packer, Terraform поддерживает различные способы аутентификации. В спецификации выше в параметре `token` задан [OAuth-токен](https://cloud.yandex.ru/docs/iam/concepts/authorization/oauth-token) от Yandex Cloud. Другой способ аутентифицироваться — использовать переменную окружения `YC_TOKEN`, в которую можно записать не только OAuth-токен, но и [IAM-токен](https://registry.terraform.io/providers/yandex-cloud/yandex/latest/docs#configuration-reference).
+
+Значения параметров или задаются в спецификации, или передаются в качестве **переменных**, чтобы адаптировать спецификацию для конкретных задач. Например, с помощью одной спецификации вы сможете развернуть одинаковую инфраструктуру в разных каталогах — для тестирования и для рабочей эксплуатации:
+
+```
+variable "folder-id" {
+  type = string
+}
+ 
+provider "yandex" {
+  token     = "<OAuth-токен>"
+  cloud_id  = "<идентификатор_облака>"
+  folder_id = var.folder-id
+  zone      = "<зона_доступности_по_умолчанию>"
+}
+```
+
+При этом ключевые ресурсы и зависимости остаются зафиксированы в спецификации и обеспечивают ее работоспособность.
+
+## Как использовать спецификации Terraform
+
+Инфраструктура разворачивается в три этапа:
+
+1. Команда `terraform init` инициализирует провайдеров, указанных в файле спецификации.
+2. Команда `terraform plan` запускает проверку спецификации. Если есть ошибки — появятся предупреждения. Если ошибок нет, отобразится список элементов, которые будут созданы или удалены.
+3. Команда `terraform apply` запускает развёртывание инфраструктуры.
+
+Если инфраструктура больше не нужна, её можно удалить командой `terraform destroy`.
+
+## Оптимизация создания инфраструктуры
+
+На самом деле Terraform не всегда создаёт заново все ресурсы, описанные в спецификации. Terraform ведёт реестр, в котором фиксирует состояние инфраструктуры в облаке. Этот реестр называется [State](https://www.terraform.io/docs/language/state/index.html) (**стейт-файл**), он имеет формат JSON.
+
+State поддерживает связь между описанием ресурсов в спецификации и реальными ресурсами в облаке. При запуске команд `plan` и `apply` стейт-файл сравнивается с ресурсами, которые нужно создать из спецификации. По итогам сравнения недостающие ресурсы создаются, лишние — удаляются, а некоторые изменяются на ходу. Такой подход позволяет существенно улучшить производительность операций развёртывания, особенно для масштабных инфраструктур. После выполнения команды `apply` стейт-файл обновляется.
+
+С помощью команд и стейт-файлов вы можете управлять конфигурацией облачной инфраструктуры: импортировать ее описание в стейт-файл (команда `terraform import`), исключить ресурсы из стейт-файла (`terraform state rm`), выгрузить описание (`terraform output` и `terraform show`).
+
+**Проверьте себя**
+
+**Переменные в Terraform нужны, чтобы...**
+
+- описывать объекты, которые меняют состояние при работе облака
+
+- описывать объекты, которые различаются в разных версиях спецификации
+
+- задавать значения, которые могут различаться в разных инсталляциях одной спецификации
+
+**Что делает команда `terraform plan`?**
+
+- Подсчитывает стоимость тарифицируемых сервисов и проверяет, достаточно ли средств на балансе
+
+- Проверяет правильность спецификации и формирует список элементов инфраструктуры, которые будут созданы, изменены или удалены
+
+- Подбирает оптимальные значения переменных для развертывания
+
+- Планирует работы, которые должны быть выполнены в облаке сразу после развертывания
+
+**Ответ** - (3;2)
+
+# Создаём виртуальную машину из образа и базу данных
+
+В этой практической работе вы установите Terraform и подготовите спецификацию, с помощью которой создадите виртуальную машину, а затем управляемую базу данных.
+
+Подсказки для создания спецификации смотрите в [документации Yandex Cloud](https://cloud.yandex.ru/docs/tutorials/infrastructure-management/terraform-quickstart) и в [справочнике ресурсов](https://registry.tfpla.net/providers/yandex-cloud/yandex/latest/docs) (раздел Resources).
+
+1. [Установите](https://learn.hashicorp.com/tutorials/terraform/install-cli) Terraform. Дистрибутив для вашей платформы можно [скачать из зеркала](https://hashicorp-releases.yandexcloud.net/terraform/). После загрузки добавьте путь к папке, в которой находится исполняемый файл, в переменную `PATH`.
+
+    [Настройте](https://cloud.yandex.ru/docs/tutorials/infrastructure-management/terraform-quickstart#configure-provider) провайдер.
+
+2. Создайте файл спецификации `my-config.tf` и [укажите](https://cloud.yandex.ru/docs/solutions/infrastructure-management/terraform-quickstart#configure-provider) в нём Yandex Cloud в качестве провайдера.
+
+```
+ terraform {
+   required_providers {
+     yandex = {
+       source = "yandex-cloud/yandex"
+     }
+   }
+ }
+  
+ provider "yandex" {
+   token  =  "<OAuth-токен>"
+   cloud_id  = "<идентификатор_облака>"
+   folder_id = "<идентификатор_каталога>"
+   zone      = "<зона_доступности_по_умолчанию>"
+ }
+ 
+```
+
+ *Далее мы будем считать, что в качестве зоны доступности по умолчанию выбрана* `ru-central1-a`.
+
+3. Добавьте в файл блок, описывающий создание ВМ. Его сложно написать с нуля, поэтому опирайтесь на [пример из документации](https://registry.tfpla.net/providers/yandex-cloud/yandex/latest/docs/resources/compute_instance). Чтобы вам было проще опознать в консоли управления объекты, созданные по этой спецификации, указывайте уникальные имена для ВМ, сети и подсети, а не оставляйте имена по умолчанию (default).
+
+4. Для создания ВМ используйте образ, созданный с помощью Packer в предыдущей практической работе.
+
+   Можно использовать [переменные](https://www.terraform.io/docs/language/values/variables.html) в спецификации Terraform и передавать в них разные значения при запуске команд. Например, если сделать переменную для идентификатора образа `image-id`, тогда с помощью одного и того же файла спецификации вы сможете создавать ВМ с разным наполнением.
+
+   Переменные Terraform хранятся в файлах с расширением `.tfvars`. Создайте файл `my-variables.tfvars` и укажите в нём идентификатор своего образа Packer (узнайте идентификатор с помощью команды `yc compute image list`):
+
+   ` image-id = "<идентификатор_образа>"`
+
+   В файле спецификации `my-config.tf` объявите эту переменную (ключевое слово `variable`). Тогда в секции, где описываются настройки ВМ, вы сможете обратиться к переменной как `var.image-id`:
+
+   ```
+    ...
+    variable "image-id" {
+        type = string
+    }
+    
+    resource "yandex_compute_instance" "vm-1" {
+    ...   
+    
+        boot_disk {
+            initialize_params {
+                image_id = var.image-id
+            }
+        }
+    ...
+    
+   ```
+
+5. Скорректируйте описание для сети и подсети.
+
+   [Для сети](https://registry.tfpla.net/providers/yandex-cloud/yandex/latest/docs/resources/vpc_network) достаточно указать имя:
+
+   `  resource "yandex_vpc_network" "network-1" {
+         name = "from-terraform-network"
+     }`
+
+   Для [подсети](https://registry.tfpla.net/providers/yandex-cloud/yandex/latest/docs/resources/vpc_subnet) укажите зону доступности и сеть, а также внутренние IP-адреса, уникальные в рамках сети. Используйте адреса из адресного пространства `10.0.0.0/16`.
+
+   ```
+     resource "yandex_vpc_subnet" "subnet-1" {
+         name           = "from-terraform-subnet"
+         zone           = "ru-central1-a"
+         network_id     = "${yandex_vpc_network.network-1.id}"
+         v4_cidr_blocks = ["10.2.0.0/16"]
+     }
+   ```
+
+6. Теперь попробуйте применить спецификацию. Перейдите в папку с файлом спецификации и выполните инициализацию.
+
+   `terraform init`
+
+   Если всё сделано верно, Terraform покажет сообщение:
+
+   ` ...
+    Terraform has been successfully initialized!
+    ...`
+
+**Важно: выполняйте команды Terraform в папке, где находится файл спецификации.**
+
+7. Проверьте спецификацию с помощью команды `terraform plan`.
+
+    Terraform использует все файлы `.tf` из папки, в которой запущена команда. Поэтому название файла спецификации `my-config.tf` указывать не нужно: его Terraform подхватит и так.
+
+    Если файл с переменными называется стандартно (`terraform.tfvars`), его тоже можно не указывать при запуске команды. А если название файла нестандартное, то его нужно указывать:
+
+   ` terraform plan -var-file=my-variables.tfvars`
+
+   Terraform выведет план: объекты, которые будут созданы, и т. п.:
+
+   ` ...
+    Terraform will perform the following actions:
+    ...`
+
+   На самом деле необязательно помещать переменные в файл, их можно просто указывать при запуске команды. Поскольку у вас только одна переменная, это было бы несложно:
+
+   ` terraform plan -var="image-id=<идентификатор_образа>"`
+
+8. Создайте в облаке инфраструктуру по описанной вами спецификации. Выполните команду:
+
+   ` terraform apply -var-file=my-variables.tfvars`
+
+   Terraform запросит подтверждение:
+
+   ```
+    ...
+    Do you want to perform these actions?
+         Terraform will perform the actions described above.
+         Only 'yes' will be accepted to approve.
+         
+         Enter a value:
+   ```
+
+   В ответ введите `yes`.
+
+     Когда команда будет выполнена, вы увидите сообщение:
+
+   ```
+     Apply complete! Resources: ... added, 0 changed, 0 destroyed.
+      
+     Outputs:
+   
+     external_ip_address_vm_1 = "84.201.133.49"
+     internal_ip_address_vm_1 = "10.2.0.24"
+   ```
+
+9. В консоли управления убедитесь, что ВМ создана. Откройте в браузере страницу с указанным IP-адресом и проверьте, доступна ли ВМ.
+
+10. Как мы говорили на предыдущем уроке, Terraform хранит описание инфраструктуры в стейт-файлах. Посмотрите, как выглядит стейт-файл сейчас:
+
+    ` terraform state list`
+
+    Вы увидите список объектов:
+
+    ` yandex_compute_instance.vm-1
+     yandex_vpc_network.network-1
+     yandex_vpc_subnet.subnet-1`
+
+11. Теперь добавьте в файл спецификации блок, описывающий создание кластера БД PostgreSQL. Подсказки ищите в [справочнике ресурсов](https://registry.tfpla.net/providers/yandex-cloud/yandex/latest/docs/resources/mdb_postgresql_cluster). Не забудьте заменить в спецификации имя подсети.
+
+12. Теперь примените обновлённую спецификацию. В папке с файлом спецификации выполните команду `terraform plan`:
+
+    `terraform plan -var-file=my-variables.tfvars`
+
+    Если появляются сообщения об ошибках — исправьте ошибки и снова выполните команду.
+
+    Обновите инфраструктуру в соответствии с дополненной спецификацией командой `terraform apply`:
+
+    `terraform apply -var-file=my-variables.tfvars`
+
+    Поскольку спецификация теперь включает создание БД, команда может выполняться довольно долго (около 10 минут).
+
+13. В консоли управления откройте раздел **Managed Service for PostgreSQL** и убедитесь, что кластер `postgres-1` создан и имеет статус `Alive`.
+
+14. Проверьте, как изменился стейт-файл:
+
+    `terraform state list`
+
+    В списке появился новый объект:
+
+    `yandex_compute_instance.vm-1
+    yandex_mdb_postgresql_cluster.postgres-1
+    yandex_vpc_network.network-1
+    yandex_vpc_subnet.subnet-1`
+
+15. Удалите инфраструктуру:
+
+    `terraform destroy -var-file=my-variables.tfvars`
+
+    В конце вы увидите сообщение о выполнении команды:
+
+    `...
+    Destroy complete! Resources: 4 destroyed.`
+
+    В консоли управления убедитесь, что объекты удалены.
+
+
+
+> По итогу за эти 2 занятия были созданы 2 файла:
+>
+> 1. my-config.tf
+>
+>    В нем описано что нужно создать и как, местами даже с пояснениями. Основная суть в том, что почемуто нужен ID существующей подсети, которая в одной области (в моем случае b) с создаваемыми сетями. 
+>
+> 2. variables.tf
+>
+>    Тут я поместил переменные, поскольку файл в формате .tf то терраформ автоматом подтягивает их, читает и использует переменные (типо можно просто использовать команды: `terraform apply`, без указания странного названия файла)
+
+```
+ terraform { 
+	required_providers { 
+		yandex = {
+			source = "yandex-cloud/yandex" //глобальный адрес источника провайдера
+		}
+	}
+}
+
+provider "yandex" { //название провайдера
+	token = "y0_AgAAAABILCSCAATuwQAAAADeFOMS7UKvjVnQThOntRdGs_Ez3WIdBfQ"
+	cloud_id = "b1gkieva61dbkorf2q2h"
+	folder_id = "b1gd4d7843kr3km8urvc"
+	zone = "ru-central1-b"
+}
+
+resource "yandex_compute_instance" "sykamashin" {
+	name = "sykamashin"
+	platform_id = "standard-v1"
+	zone = "ru-central1-b"
+	description = "создал ВМ через терраформ"
+	
+	resources { //вычеслительные ресурсы (обязательно)
+		cores = 2
+		memory = 2
+	}
+	
+	boot_disk { //загрузочный диск (обязательно)
+		initialize_params { //параметры нового диска
+			image_id = var.image-id // образ диска для инициализации этого диска
+		}
+	}
+	
+	network_interface { // сети для подключения к экземпляру, можно указать несколько.
+		subnet_id = var.syka-subnet // ID подсети, к которой нужно подключить этот интерфейс, подсеть должна существовать в тойже зоне, где будет создан этот экземпляр
+		nat = true //предоставить публичны адрес, например для доступа в интерент 
+	
+	}
+	
+	metadata = { //пары "ключ-значение" метаданных, чтобы сделать их доступными из экземпляра
+		ssh-keys = "ubuntu:${file("~/.ssh/id_rsa.pub")}"
+	}
+}
+
+resource "yandex_vpc_network" "network-syka" {
+	name = "network-syka"
+	description = "создал сеть через терраформ"
+}
+
+resource "yandex_vpc_subnet" "syka-subnet" {
+	name = "syka-subnet"
+	zone = "ru-central1-b"
+	network_id = "${yandex_vpc_network.network-syka.id}"
+	v4_cidr_blocks = ["10.2.0.0/16"]
+	description = "Создал подсеть через терраформ"
+}
+
+
+
+
+
+resource "yandex_mdb_postgresql_cluster" "cluster-psql-1" {
+  name        = "cluster-psql-1"
+  environment = "PRESTABLE"
+  network_id  = yandex_vpc_network.network-syka.id
+
+  config {
+    version = 12
+    resources {
+      resource_preset_id = "s2.micro"
+      disk_type_id       = "network-hdd"
+      disk_size          = 16
+    }
+    postgresql_config = {
+      max_connections                   = 395
+      enable_parallel_hash              = true
+      vacuum_cleanup_index_scale_factor = 0.2
+      autovacuum_vacuum_scale_factor    = 0.34
+      default_transaction_isolation     = "TRANSACTION_ISOLATION_READ_COMMITTED"
+      shared_preload_libraries          = "SHARED_PRELOAD_LIBRARIES_AUTO_EXPLAIN,SHARED_PRELOAD_LIBRARIES_PG_HINT_PLAN"
+    }
+  }
+
+database {
+    name  = "psql-1"
+    owner = "PowerfullMashin"
+  }
+ 
+  user {
+    name       = "PowerfullMashin"
+    password   = "mycatisRaisa123"
+    conn_limit = 50
+    permission {
+      database_name = "psql-1"
+    }
+    settings = {
+      default_transaction_isolation = "read committed"
+      log_min_duration_statement    = 5000
+    }
+  }
+
+  host {
+    zone      = "ru-central1-b"
+    subnet_id = yandex_vpc_subnet.syka-subnet.id
+  }
+}
+
+
+
+
+
+output "internal_ip_address_vm_1" {
+  value = yandex_compute_instance.sykamashin.network_interface.0.ip_address
+}
+ 
+output "external_ip_address_vm_1" {
+  value = yandex_compute_instance.sykamashin.network_interface.0.nat_ip_address
+}
+```
+
+
+
+```
+variable "image-id" {
+  type = string
+  default = "fd89a79t1ttbrpfnk3di"
+  description = "переменная для снимка диска ВМ"
+}
+variable "syka-subnet" {
+  type = string
+  default = "e2lp7u64ccpfjfhdvo20"
+  description = "переменная для ID подсети, сети default"
+}
+
+```
+
+
+
+
+

@@ -1,0 +1,41 @@
+name: my-group
+service_account_id: aje6v4jfn6fidv029gieнс
+ 
+instance_template:	# этот раздел - описание спецификации ВМ
+    platform_id: standard-v1
+    resources_spec:
+        memory: 2g
+        cores: 2
+    boot_disk_spec:	# описание загрузочного диска: будет использоваться на чтение и запись (mode)
+        mode: READ_WRITE
+        disk_spec:	
+            image_id: fd81hgrcv6lsnkremf32 	# идентификатор образа, здесь просто укажем последнюю версию ubuntu, нашел ее через команду ~yc compute image list --folder-id standard-images  
+
+            type_id: network-hdd
+            size: 32g
+    network_interface_specs:	# описание сети
+        - network_id: enp2nd44v2qtiogg8de7
+          primary_v4_address_spec: { one_to_one_nat_spec: { ip_version: IPV4 }}
+    scheduling_policy:		# описание политики планирования 
+        preemptible: false	# машина не прерываемая
+    metadata:			# для автоматизации процесса (чтобы не заходить в ВМ и не устанавливать ПО в ручную), пропишим команды для установки ПО, установим на машине веб-сервер nginx и на созданной по умолчанию веб-странице index.nginx-debian.html в записи «Welcome to nginx», nginx заменим идентификатором активной ВМ и версией ОС.
+      user-data: |-
+        #cloud-config		
+          package_update: true
+          runcmd:
+            - [ apt-get, install, -y, nginx ]
+            - [/bin/bash, -c, 'source /etc/lsb-release; sed -i "s/Welcome to nginx/It is $(hostname) on $DISTRIB_DESCRIPTION/" /var/www/html/index.nginx-debian.html']
+ 
+deploy_policy:		# политика развертывания
+    max_unavailable: 1	# в каждый момент времени неработоспособна может быть лишь одна машина, не больше
+    max_expansion: 0	# запрет на увеличение машин
+scale_policy:		# политика масштабирования. создание группы фиксированного размера
+    fixed_scale:
+        size: 3		# размер группы (3 вм)
+allocation_policy:	# политика распределения машин по зонам
+    zones:
+        - zone_id: ru-central1-a	# будет использоваться зона а
+ 
+load_balancer_spec:	# спецификация для балансировщика
+    target_group_spec:
+        name: my-target-group	# он будет привязан к группе ВМ с таким названием (она же указана в самом верху манифеста)
